@@ -6,10 +6,28 @@ import os
 import alpaca_trade_api as tradeapi
 import math
 
+prices = {}
+market_prices = {}
+    
 class Trade:
     def __init__(self, start_amount=10000, number_of_tickers=1):
         self.start_amount = start_amount
         self.ticker_portion = round(start_amount/number_of_tickers,2)
+
+        load_dotenv()
+        alpaca_api_key = os.getenv('ALPACA_API_KEY')
+        alpaca_secret_key = os.getenv('ALPACA_SECRET_KEY')
+
+        # Create the Alpaca API object
+        self.alpaca_api = tradeapi.REST(
+           alpaca_api_key,
+           alpaca_secret_key,
+           api_version = 'v2'
+        )
+    
+        # Set timeframe to "1Day" for Alpaca API
+        self.timeframe = "1Day"
+
     """ If to buy, we can only use start_amount/number_of_tickers at a time, or spend all
         If to sell, sell all shares
     """
@@ -32,7 +50,7 @@ class Trade:
             status = -1
             msg = 'no ticker'
         else:
-            price = market_price(on, [ticker])
+            price = self.market_price(on, ticker)
             spend = self.spend_how_much( b_bal, price )
             if price < 0:
                 status = -1
@@ -62,34 +80,41 @@ class Trade:
                  'status' : status,
                  'msg' : msg }
 
-def market_price( on, tickers ):
-    load_dotenv()
-    alpaca_api_key = os.getenv('ALPACA_API_KEY')
-    alpaca_secret_key = os.getenv('ALPACA_SECRET_KEY')
-
-    # Create the Alpaca API object
-    alpaca_api = tradeapi.REST(
-       alpaca_api_key,
-       alpaca_secret_key,
-       api_version = 'v2'
-    )
-    
-    # Set timeframe to "1Day" for Alpaca API
-    timeframe = "1Day"
-    start_end = pd.Timestamp(on,tz='America/New_York')
+    def market_price( self, on, ticker ):
+        #print(market_prices)
+        
+        try:
+            prices = market_prices[on]
+            try:
+                price = prices[ticker]
+            except KeyError:
+                price = self.get_market_price( on, ticker )
+                prices[ticker] = price
             
-    # Get number_of_years' worth of historical data for tickers
-    data_df = alpaca_api.get_bars(
-        tickers,
-        timeframe,
-        start = start_end.isoformat(),
-        end = start_end.isoformat()
-    ).df
-    if len(data_df) == 0:
-        return -1
-    return round( data_df.iloc[-1][['high','low','open','close']].sum()/4,2 )
+        except KeyError:    
+            price = self.get_market_price( on, ticker )
+            prices = {}
+            prices[ticker] = price
+            market_prices[on] = prices
+        
+        return price
+    
+    def get_market_price( self, on, ticker ):
+        start_end = pd.Timestamp(on, tz='America/New_York')
+        data_df = self.alpaca_api.get_bars(
+                [ticker],
+                self.timeframe,
+                start = start_end.isoformat(),
+                end = start_end.isoformat()
+            ).df
+            
+        if len(data_df) == 0:
+            return -1
+            
+        return round( data_df.iloc[-1][['high','low','open','close']].sum()/4,2 )
+            
 
-def trade_action( instr, start_amount=10000.00 ):
+def trade_action( instr, start_amount=10000.00, verbose=1 ):
     # 0: date, 1: ticker, 2: action
     trade = Trade(start_amount, len(set(instr.iloc[:,1])))
     bal = start_amount
@@ -109,8 +134,10 @@ def trade_action( instr, start_amount=10000.00 ):
                              b_bal=bal,
                              shares=share
                             ) 
-        print(f"On {one_trade[0]} trade {one_trade[1]}")
-        print(traded)
+        if verbose == 1:
+            print(f"On {one_trade[0]} trade {one_trade[1]}")
+            print(traded)
+            
         if traded['status'] == 0:
             bal = traded['bal']
             try:
@@ -128,10 +155,15 @@ def trade_action( instr, start_amount=10000.00 ):
             perf_one_row[key] = shares[key]
         perf_one_row['networth'] = traded['bal'] + share_worth
         perf = pd.concat([perf, perf_one_row], join='outer')
+    
+    final_worth = round(traded['bal'] + share_worth,2)
+    if verbose == 1:
+        print(f"""networth: Cash: {traded['bal']}, 
+                  shares: {shares}, 
+                  total: {final_worth}""")
         
-    print(f"""networth: Cash: {traded['bal']}, 
-              shares: {shares}, 
-              total: {round(traded['bal'] + share_worth,2)}""")
+    if verbose == 0:
+        return final_worth
     
     perf = perf.rename(columns = { 0:'date', 1:'cash' })
     perf = perf.set_index('date')
@@ -145,4 +177,5 @@ def trade_action( instr, start_amount=10000.00 ):
                                                   ylabel='dollars',
                                                   title='networth and cash'
                                                  )
-    return share_plot + money_plot
+    if verbose == 1:
+        return share_plot + money_plot 
